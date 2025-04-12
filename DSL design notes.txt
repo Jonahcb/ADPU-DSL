@@ -1,0 +1,358 @@
+
+
+# ================================
+# Sample Program
+# ================================
+
+Raw sample program in DSL:
+
+SELECT_PPSE:
+  DirectoryName: 2PAY.SYS.DDF01
+
+SELECT_APP:
+  AID: A0 00 00 00 03 10 10
+
+GET_PROCESSING_OPTIONS:
+  TerminalTransactionQualifiers: 12 00 00 00
+  AmountAuthorized: 00 00 00 01 00 00
+
+READ_RECORD:
+  Record: 1
+  SFI: 1
+
+GENERATE_AC:
+  Amount: 1.00
+  CountryCode: 0250
+  UnpredictableNumber: random
+
+
+2). List of static checks to perform
+
+
+# ================================
+# List of Static Checks
+# ================================
+
+# CATEGORY: COMMAND STRUCTURE CHECKS
+
+- [ ] Unknown Command Type
+      → Error if the command block name is not in the supported set:
+         (SELECT_PPSE, SELECT_APP, GET_PROCESSING_OPTIONS, READ_RECORD, GENERATE_AC)
+
+- [ ] Required Fields Missing
+      → Error if required fields are not present for a command.
+         Examples:
+         - SELECT_PPSE: must include DirectoryName
+         - SELECT_APP: must include AID
+         - GET_PROCESSING_OPTIONS: must include required PDOL tags (e.g., TTQ, Amount)
+         - READ_RECORD: must include Record and SFI
+         - GENERATE_AC: must include all tags required by CDOL1 (e.g., Amount, CountryCode, UN)
+
+# CATEGORY: FIELD TYPE & VALUE CHECKS
+
+## → Numeric Fields
+
+- [ ] SFI must be an integer between 1 and 30 (inclusive)
+- [ ] Record must be an integer between 1 and 4 (typically)
+- [ ] Amount (in GENERATE_AC or GPO) must be a decimal number (e.g., 1.00)
+- [ ] Amount must be non-negative and convertible to 6-byte BCD
+
+## → Country Code (TerminalCountryCode)
+
+- [ ] Must be a 3-digit numeric string (e.g., 0250)
+- [ ] Must be within valid ISO numeric country code range (0 to 999)
+
+## → Unpredictable Number (UN)
+
+- [ ] If not set to "random", must be an 8-character hex string (4 bytes)
+- [ ] Warn if UN is fixed (not random)
+
+## → Hex String Fields (e.g., AID, TTQ, raw tag values)
+
+- [ ] Must contain only valid hex characters (0-9, A-F)
+- [ ] Must have an even number of characters (e.g., A0000000031010 is 14 hex chars → 7 bytes)
+- [ ] Validate specific lengths where applicable:
+      - AID must be 5–16 bytes (typical: 7 bytes for Visa)
+
+## → PDOL/GPO Data Values
+
+- [ ] Must match expected lengths based on PDOL
+- [ ] Data fields like TerminalTransactionQualifiers and AmountAuthorized must match tag length
+
+
+
+
+
+
+
+# EMV Kernel 8 Contactless Transaction – APDU Command Flow (Visa Example)
+# -----------------------------------------------------------------------
+# All commands are sent from the terminal to the card (contactless).
+# This flow assumes full EMV mode (not magstripe fallback).
+# Hex values shown are illustrative and may vary depending on card data.
+
+=======================================================================
+1. SELECT Proximity Payment System Environment (PPSE)
+=======================================================================
+Command: 00 A4 04 00 0E 32 50 41 59 2E 53 59 53 2E 44 44 46 30 31 00  
+Meaning: Select the directory '2PAY.SYS.DDF01' to list supported apps
+
+
+# CLA (Class byte):        00  -> ISO/IEC 7816-4 standard interindustry command
+# INS (Instruction byte):  A4  -> SELECT command
+# P1 (Parameter 1):        04  -> Select by name (Dedicated File name = AID or directory name)
+# P2 (Parameter 2):        00  -> Select the first or only occurrence, request FCI template
+# Lc (Length of command data): 0E  -> 14 bytes of data to follow
+# Data (Command data):          32 50 41 59 2E 53 59 53 2E 44 44 46 30 31
+#                               -> ASCII encoding of '2PAY.SYS.DDF01' (Proximity Payment System Environment)
+# Le (Expected response length): 00 -> Le = 0 means “return the full response”
+
+-----------------------------------------------------------------------
+
+=======================================================================
+2. SELECT Visa AID
+=======================================================================
+Command: 00 A4 04 00 07 A0 00 00 00 03 10 10 00  
+Meaning: Select the Visa debit/credit application by AID
+
+
+# CLA (Class byte):                00  -> ISO/IEC 7816-4 standard interindustry command
+# INS (Instruction byte):          A4  -> SELECT command
+# P1 (Parameter 1):                04  -> Select by name (Dedicated File name = AID)
+# P2 (Parameter 2):                00  -> First or only occurrence, request FCI template
+# Lc (Length of command data):     07  -> 7 bytes of data to follow
+# Data (Command data):             A0 00 00 00 03 10 10
+#                                  -> Visa AID (Application Identifier) for credit/debit: A0000000031010
+# Le (Expected response length):   00  -> Le = 0 means “return the full response”
+
+
+-----------------------------------------------------------------------
+
+=======================================================================
+3. GET PROCESSING OPTIONS (GPO)
+=======================================================================
+Command (example): 80 A8 00 00 23 83 21 9F66 04 12 00 00 00 9F02 06 00 00 00 01 00 ...
+Meaning: Send terminal data as requested in the PDOL (parsed from SELECT response)
+Note: You must construct PDOL data with correct TLV values
+
+
+# CLA (Class byte):                80  -> Proprietary command (non-ISO standard)
+# INS (Instruction byte):          A8  -> GET PROCESSING OPTIONS
+# P1 (Parameter 1):                00  -> Reserved by EMV; must be '00'
+# P2 (Parameter 2):                00  -> Reserved by EMV; must be '00'
+# Lc (Length of command data):     0B  -> 11 bytes of data to follow
+# Data (Command data):             83 09 ... (parse from SELECT AID response)
+#     - 83: Template tag for GPO data
+#     - 09: Length of the following value (9 bytes total)
+#     - 9F66 04: Terminal Transaction Qualifiers (4 bytes) → example: 12 00 00 00
+#     - 9F02 06: Amount, Authorized (6 bytes) → example: 00 00 00 01 00 00
+# Le (Expected response length):   00  -> Le = 0 means “return the full response”
+
+
+-----------------------------------------------------------------------
+
+=======================================================================
+4. READ RECORDS (based on AFL from GPO response)
+=======================================================================
+Command: 00 B2 01 0C 00  
+Meaning: Read record 1, SFI 1 (example only)
+
+Command: 00 B2 02 0C 00  
+Meaning: Read record 2, SFI 1 (if required)
+
+
+# CLA (Class byte):                00  -> ISO/IEC 7816-4 standard interindustry command
+# INS (Instruction byte):          B2  -> READ RECORD command
+# P1 (Parameter 1):                01  -> Record number to read (record 1 in this case)
+# P2 (Parameter 2):                0C  -> SFI (Short File Identifier) = 1, encoded as (SFI << 3) | 4 → (1 << 3) + 4 = 0C
+# Le (Expected response length):   00  -> Le = 0 means “return the full response”
+
+
+-----------------------------------------------------------------------
+
+=======================================================================
+5. GENERATE APPLICATION CRYPTOGRAM (AC)
+=======================================================================
+Command (example): 80 AE 00 00 XX [CDOL1 Data]
+Meaning: Request ARQC (Authorization Request Cryptogram) using CDOL1 data
+Note: CDOL1 is obtained from earlier records. Must construct full TLV input.
+
+
+# CLA (Class byte):                80  -> Proprietary class used for EMV-specific commands
+# INS (Instruction byte):          AE  -> GENERATE APPLICATION CRYPTOGRAM
+# P1 (Parameter 1):                00  -> Request ARQC (Authorization Request Cryptogram)
+# P2 (Parameter 2):                00  -> Reserved or subtype; typically 00
+# Lc (Length of command data):     XX  -> Number of bytes of CDOL1 data (sum of value lengths only)
+# Data (Command data):             [CDOL1 Data] – concatenated values, no tags or lengths
+#
+# IMPORTANT:
+# The card tells us which fields (tags) it wants in the GENERATE AC command via:
+# → Tag 8C (CDOL1), found in the response(s) to READ RECORD
+#
+# For example, you might see this in a READ RECORD response:
+#     8C 0C 9F02 06 9F1A 02 9F37 04
+#   → This tells us that the card expects:
+#       - 9F02 (Amount, Authorized):        6 bytes
+#       - 9F1A (Terminal Country Code):     2 bytes
+#       - 9F37 (Unpredictable Number):      4 bytes
+#
+# So you build the data field for GENERATE AC as just:
+#     [6-byte value for 9F02] + [2-byte value for 9F1A] + [4-byte value for 9F37]
+#     → Example: 00 00 00 00 01 00 02 50 12 34 56 78
+#
+# DO NOT include the TLV structure (i.e., do NOT include the tags or lengths),
+#     just the raw values in the exact order given by CDOL1
+#
+# Le (Expected response length):   [Optional or implied] – typically omitted
+
+
+
+-----------------------------------------------------------------------
+
+# End of Kernel 8 APDU Command Sequence
+
+
+
+# ------------------------------
+# HIGH-LEVEL DSL: SELECT_PPSE
+# ------------------------------
+# This command selects the PPSE directory to retrieve supported AIDs.
+#
+# FIXED FIELDS:
+#   CLA = 00        → Standard ISO command
+#   INS = A4        → SELECT
+#   P1  = 04        → Select by name (DF name)
+#   P2  = 00        → First/only occurrence
+#   Le  = 00        → Full response
+#
+# DSL only needs:
+#   DirectoryName → ASCII string, e.g. '2PAY.SYS.DDF01'
+#     (The DSL will convert this to hex and compute Lc accordingly)
+
+# SELECT_PPSE:
+#   DirectoryName: 2PAY.SYS.DDF01
+
+
+
+
+# ------------------------------
+# HIGH-LEVEL DSL: SELECT_VISA
+# ------------------------------
+# This command selects a specific payment application (AID).
+#
+# FIXED FIELDS:
+#   CLA = 00        → ISO
+#   INS = A4        → SELECT
+#   P1  = 04        → Select by AID
+#   P2  = 00        → First/only occurrence
+#   Le  = 00        → Full response
+#
+# DSL only needs:
+#   AID → Hex string (space-separated or continuous), e.g. A0000000031010
+
+# SELECT_APP:
+#   AID: A0 00 00 00 03 10 10
+
+
+
+
+# ------------------------------
+# HIGH-LEVEL DSL: GET_PROCESSING_OPTIONS
+# ------------------------------
+# This command tells the card: here is the terminal data you asked for (PDOL).
+#
+# FIXED FIELDS:
+#   CLA = 80        → Proprietary
+#   INS = A8        → GET PROCESSING OPTIONS
+#   P1  = 00
+#   P2  = 00
+#   Le  = 00
+#
+# DSL must:
+#   - Accept the PDOL fields and values
+#   - Construct TLV data inside a tag 83 wrapper
+#   - Compute Lc = length of tag + len
+#
+# Values should match the PDOL returned by the card (e.g., 9F66, 9F02, etc.)
+
+# GET_PROCESSING_OPTIONS:
+#   TerminalTransactionQualifiers: 12 00 00 00
+#   AmountAuthorized: 00 00 00 01 00 00
+
+
+
+# ------------------------------
+# HIGH-LEVEL DSL: READ_RECORD
+# ------------------------------
+# This command reads a record from the card file system.
+#
+# FIXED FIELDS:
+#   CLA = 00
+#   INS = B2
+#   Le  = 00
+#
+# DSL must compute:
+#   P2 = (SFI << 3) | 4
+#
+# DSL needs from user:
+#   Record: integer (1–4 usually)
+#   SFI: integer (1–30)
+
+# READ_RECORD:
+#   Record: 1
+#   SFI: 1
+
+# READ_RECORD:
+#   Record: 2
+#   SFI: 1
+
+
+
+
+# ------------------------------
+# HIGH-LEVEL DSL: GENERATE_AC
+# ------------------------------
+# This high-level form lets you specify only the key values required to construct
+# the GENERATE AC (Application Cryptogram) command.
+#
+# You DO NOT need to specify CLA, INS, P1, P2, Lc, Data, or Le.
+# These are automatically handled by the DSL compiler as follows:
+#
+# FIXED FIELDS (pre-filled by the DSL engine):
+#   CLA = 80       → Proprietary command
+#   INS = AE       → GENERATE AC
+#   P1  = 00       → Request ARQC (Authorization Request Cryptogram)
+#   P2  = 00       → Reserved / default
+#   Le  = 00       → Full response
+#
+# CDOL1 DATA FIELD:
+#   The card tells us which fields it wants via tag 8C (CDOL1), found in READ RECORD response.
+#   Example CDOL1: 9F02 (Amount) 6 bytes, 9F1A (Country) 2 bytes, 9F37 (UN) 4 bytes
+#
+#   The DSL takes human-readable fields like:
+#     - Amount: 1.00         → 00 00 00 00 01 00
+#     - CountryCode: 0250    → 02 50
+#     - UnpredictableNumber: random → generated as 4 bytes (e.g., 12 34 56 78)
+#
+#   It converts these to raw hex values, concatenates them in the correct order,
+#   and computes Lc (length = total bytes), then builds:
+#
+#     80 AE 00 00 [Lc] [Data] 00
+#
+# Example final command: (auto-generated)
+#   80 AE 00 00 0C 00 00 00 00 01 00 02 50 12 34 56 78 00
+#
+# Goal: Write only the values — let the DSL handle the APDU construction.
+
+
+
+
+
+
+
+
+
+
+
+
+
